@@ -50,4 +50,58 @@ def generate_fraud_features(df: pl.DataFrame) -> pl.DataFrame:
         .drop("prev_click_time")
     )
 
+    df_features = df_features.with_columns([
+    # Menghitung Standar Deviasi selisih waktu dalam blok 1 Jam untuk setiap IP
+    # Semakin kecil nilainya, semakin "mesin" perilakunya
+    pl.col("seconds_since_prev_click")
+        .std()
+        .over([pl.col("ip"), pl.col("click_time").dt.truncate("1h")])
+        .alias("ip_rhythm_std_1h"),
+        ])
+
     return df_features
+
+def apply_heuristic_rules(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Melabeli baris sebagai 'obvious bot' berdasarkan ambang batas heuristik.
+    """
+    # Pastikan attributed_time sudah datetime jika ada
+    if "attributed_time" in df.columns and df.schema.get("attributed_time") == pl.String:
+        df = df.with_columns(
+            pl.col("attributed_time").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S", strict=False)
+        )
+
+    # Kalkulasi CTIT (Click-To-Install Time)
+    if "attributed_time" in df.columns:
+        df = df.with_columns(
+            (pl.col("attributed_time") - pl.col("click_time"))
+                .dt.total_seconds()
+                .alias("ctit_seconds")
+        )
+    else:
+        df = df.with_columns(pl.lit(None).alias("ctit_seconds"))
+
+    # Definisi Rules (Predicate)
+    rule_speed     = (pl.col("seconds_since_prev_click") >= 0) & (pl.col("seconds_since_prev_click") < 0.5)
+    rule_burst     = pl.col("ip_clicks_last_10m") > 300
+    rule_emulator  = pl.col("fingerprint_clicks_last_1h") > 150
+    rule_spraying  = pl.col("ip_unique_channels_per_hour") > 20
+    rule_injection = (pl.col("ctit_seconds").is_not_null()) & (pl.col("ctit_seconds") < 3.0)
+
+    # Aplikasi Label dan Alasan
+    df = df.with_columns([
+        pl.when(rule_speed | rule_burst | rule_emulator | rule_spraying | rule_injection)
+          .then(True)
+          .otherwise(False)
+          .alias("is_obvious_bot"),
+
+        pl.when(rule_injection).then(pl.lit("Click Injection"))
+          .when(rule_speed).then(pl.lit("Super Human Speed"))
+          .when(rule_burst).then(pl.lit("Burst Clicks"))
+          .when(rule_emulator).then(pl.lit("Persistent Emulator"))
+          .when(rule_spraying).then(pl.lit("Channel Spraying"))
+          .otherwise(pl.lit("Normal"))
+          .alias("rule_based_reason")
+    ])
+
+    return df
