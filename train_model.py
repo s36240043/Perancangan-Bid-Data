@@ -1,5 +1,6 @@
 import polars as pl
 from sklearn.ensemble import IsolationForest
+import xgboost as xgb
 import numpy as np
 
 def train_isolation_forest(df: pl.DataFrame, features: list, contamination=0.05) -> pl.DataFrame:
@@ -22,9 +23,9 @@ def train_isolation_forest(df: pl.DataFrame, features: list, contamination=0.05)
     # 2. IMPUTASI CERDAS (Smart Imputation)
     # Jika ritme (std) null, artinya klik kurang dari syarat. 
     # Kita isi 999.0 agar ML menganggap ini variansi tinggi (sangat acak = manusia)
-    df_train = df_train.with_columns([
-        pl.col("ip_rhythm_std_1h").fill_null(999.0)
-    ])
+    # df_train = df_train.with_columns([
+    #     pl.col("ip_rhythm_std_1h").fill_null(999.0)
+    # ])
 
     # 3. KONVERSI MEMORI EFISIEN (Polars -> NumPy)
     # Kita tidak menggunakan .to_pandas() untuk menghindari RAM meledak
@@ -81,3 +82,105 @@ def train_isolation_forest(df: pl.DataFrame, features: list, contamination=0.05)
     print("✅ Training Selesai!")
     return df_final
 
+def train_and_infer_xgboost(df: pl.DataFrame, rule_features: list, ml_features: list) -> pl.DataFrame:
+    """
+    Melatih model XGBoost pada data Ground Truth ekstrem, 
+    lalu memprediksi probabilitas bot pada data yang mencurigakan (FLAG_FOR_ML).
+    """
+    print("\n" + "="*60)
+    print("🚀 MEMULAI SEMI-SUPERVISED XGBOOST PIPELINE")
+    print("="*60)
+
+    
+
+    # 1. PERSIAPAN DATA PELATIHAN (GROUND TRUTH)
+    print("1. Mengekstraksi Data Ground Truth...")
+    df_train = df.filter(
+        pl.col("business_action").is_in(["HARD_BLOCK_REJECT_PAYOUT", "PASS_ORGANIC"])
+    )
+    
+    # Membuat Pseudo-Label (Target Variable Y)
+    df_train = df_train.with_columns([
+        pl.when(pl.col("business_action") == "HARD_BLOCK_REJECT_PAYOUT")
+          .then(pl.lit(1))
+          .otherwise(pl.lit(0))
+          .alias("is_bot_target")
+    ])
+
+    # Imputasi nilai kosong pada fitur ML (contoh: ip_rhythm_std_1h)
+    # Kita menggunakan nilai median agar tidak terdeteksi sebagai outlier
+    # for feat in ml_features:
+    #     if df_train.schema[feat] in [pl.Float64, pl.Float32, pl.Int64, pl.Int32]:
+    #         df_train = df_train.with_columns(pl.col(feat).fill_null(999.0))
+
+    # Konversi ke NumPy (Menghindari Pandas untuk efisiensi RAM)
+    X_train = df_train.select(ml_features).to_numpy()
+    y_train = df_train.select("is_bot_target").to_numpy().flatten()
+    print(f"   Distribusi Pelatihan: {np.sum(y_train==1):,} Bot | {np.sum(y_train==0):,} Manusia")
+
+    # 2. PELATIHAN MODEL XGBOOST
+    print("\n2. Melatih Model XGBoost (Orthogonal Feature Space)...")
+    # Parameter dioptimalkan untuk kecepatan dan pencegahan overfitting (regularisasi L2)
+    xgb_params = {
+        'objective': 'binary:logistic',
+        'eval_metric': 'logloss',
+        'max_depth': 5,          # Pohon tidak terlalu dalam untuk mencegah hafalan
+        'learning_rate': 0.1,
+        'n_estimators': 100,
+        'reg_lambda': 1.0,       # L2 Regularization (Penalti fitur dominan)
+        'n_jobs': -1,
+        'random_state': 42
+    }
+    
+    model = xgb.XGBClassifier(**xgb_params)
+    model.fit(X_train, y_train)
+
+    # 3. PERSIAPAN DATA INFERENSI (ZONA ABU-ABU)
+    print("\n3. Mengeksekusi Inferensi pada Zona Abu-abu (FLAG_FOR_ML)...")
+    df_grey = df.filter(pl.col("business_action") == "FLAG_FOR_ML")
+    
+    # # Imputasi fitur ML pada data inferensi menggunakan logika yang sama
+    # for feat in ml_features:
+    #     if df_grey.schema[feat] in [pl.Float64, pl.Float32, pl.Int64, pl.Int32]:
+    #         df_grey = df_grey.with_columns(pl.col(feat).fill_null(999.0))
+
+    X_grey = df_grey.select(ml_features).to_numpy()
+
+    # 4. PREDIKSI PROBABILITAS
+    # predict_proba menghasilkan matriks [Probabilitas 0, Probabilitas 1]
+    grey_probabilities = model.predict_proba(X_grey)[:, 1]
+
+    # Menggabungkan hasil probabilitas kembali ke dataframe Polars
+    df_grey_scored = df_grey.with_columns([
+        pl.Series("bot_probability", grey_probabilities).cast(pl.Float32)
+    ])
+
+    # 5. INTEGRASI KEPUTUSAN BISNIS (THRESHOLDING)
+    # Asumsi Threshold: Jika probabilitas > 0.85, anggap Bot. Sisanya bersihkan.
+    df_grey_scored = df_grey_scored.with_columns([
+        pl.when(pl.col("bot_probability") > 0.85)
+          .then(pl.lit("ML_DETECTED_BOT"))
+          .otherwise(pl.lit("CLEARED_BY_ML"))
+          .alias("final_business_action")
+    ])
+
+    # Untuk data pelatihan (Ground Truth), berikan probabilitas absolut dan pertahankan status aslinya
+    df_train_scored = df_train.with_columns([
+        pl.when(pl.col("is_bot_target") == 1)
+          .then(pl.lit(1.0).cast(pl.Float32))
+          .otherwise(pl.lit(0.0).cast(pl.Float32))
+          .alias("bot_probability"),
+        pl.col("business_action").alias("final_business_action")
+    ]).drop("is_bot_target") # Buang kolom pseudo-label agar skema sama
+
+    # 6. GABUNGKAN SELURUH DATA
+    df_final = pl.concat([df_train_scored, df_grey_scored])
+    
+    print("\n✅ Pipeline Selesai! Dataframe akhir telah disatukan.")
+    return model, df_final
+
+# --- CARA PENGGUNAAN ---
+# rule_features = ["ip_clicks_last_10m", "seconds_since_prev_click", "fingerprint_clicks_last_1h"]
+# ml_features = ["ip_rhythm_std_1h", "ip_unique_channels_per_hour", "device_os_entropy", "is_first_click"] # Fitur Ortogonal
+
+# df_scored = train_and_infer_xgboost(df_strategy, rule_features, ml_features)

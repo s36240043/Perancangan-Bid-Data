@@ -58,6 +58,20 @@ def generate_fraud_features(df: pl.DataFrame) -> pl.DataFrame:
         .over([pl.col("ip"), pl.col("click_time").dt.truncate("1h")])
         .alias("ip_rhythm_std_1h"),
         ])
+    
+    df_features = df_features.with_columns([
+    # 1. Flag eksplisit untuk klik pertama
+    pl.when(pl.col("ip_clicks_last_10m") <= 1)
+      .then(pl.lit(1))
+      .otherwise(pl.lit(0))
+      .alias("is_first_click"),
+      
+    # 2. Variansi OS: Menghitung berapa banyak OS berbeda dari IP ini dalam 1 jam
+    pl.col("os").n_unique().over(["ip", "click_hour"]).alias("ip_unique_os_per_hour"),
+    
+    # 3. Variansi Aplikasi: Apakah IP ini mendownload 50 aplikasi berbeda sekaligus?
+    pl.col("app").n_unique().over(["ip", "click_hour"]).alias("ip_unique_apps_per_hour")
+])
 
     return df_features
 
