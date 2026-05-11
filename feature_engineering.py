@@ -1,17 +1,17 @@
 import polars as pl
-
 def generate_fraud_features(df: pl.DataFrame) -> pl.DataFrame:
     """
     Mengekstrak fitur anomali bot dari log klik menggunakan Polars.
+    Versi ini dioptimalkan untuk XGBoost (Native NaN Handling) dan menghindari data leakage.
     """
-
+    
     # 1. Konversi format waktu
     if df.schema.get("click_time") == pl.String:
         df = df.with_columns(
             pl.col("click_time").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S")
         )
 
-    # 2. Pengurutan waktu
+    # 2. Pengurutan waktu terpusat (Krusial untuk fungsi shift)
     df = df.sort("click_time")
 
     # 3. Pipeline Eksekusi Berantai
@@ -19,59 +19,67 @@ def generate_fraud_features(df: pl.DataFrame) -> pl.DataFrame:
         df.with_columns([
             pl.col("click_time").dt.hour().alias("click_hour"),
             pl.col("click_time").dt.minute().alias("click_minute"),
-            pl.col("click_time").shift(1).over(["ip", "device", "os"]).alias("prev_click_time")
+            # Mencari waktu klik sebelumnya spesifik untuk setiap IP
+            pl.col("click_time").shift(1).over("ip").alias("prev_click_time")
         ])
         .with_columns([
             # -- FITUR SEKUENSIAL --
+            # Dibiarkan bernilai Null untuk klik pertama (tanpa fill_null)
             (pl.col("click_time") - pl.col("prev_click_time"))
                 .dt.total_seconds()
-                .fill_null(-1)
                 .alias("seconds_since_prev_click"),
 
-            # -- FITUR DENSITAS WAKTU (KOREKSI DENGAN TRUNCATE) --
-            # Total klik IP dalam blok 10 menit
-            pl.col("app")
-                .count()
+            # -- FITUR DENSITAS WAKTU --
+            pl.col("app").cumcount()
                 .over([pl.col("ip"), pl.col("click_time").dt.truncate("10m")])
                 .alias("ip_clicks_last_10m"),
 
-            # Total klik perangkat (fingerprint) dalam blok 1 jam
-            pl.col("app")
-                .count()
+            pl.col("app").cumcount()
                 .over(["ip", "device", "os", pl.col("click_time").dt.truncate("1h")])
                 .alias("fingerprint_clicks_last_1h"),
 
-            # -- FITUR DIVERSITAS --
-            pl.col("channel")
-                .n_unique()
+            # -- FITUR DIVERSITAS (EXPANDING / NO FUTURE LEAK) --
+            # tandai kemunculan pertama channel dalam (ip, hour) lalu akumulasi => distinct so far
+            (
+                (pl.col("channel")
+                   .cumcount()
+                   .over([pl.col("ip"), pl.col("channel"), pl.col("click_time").dt.truncate("1h")]) == 0)
+                .cast(pl.Int32)
+                .cumsum()
                 .over([pl.col("ip"), pl.col("click_time").dt.truncate("1h")])
-                .alias("ip_unique_channels_per_hour")
-        ])
-        .drop("prev_click_time")
-    )
+            ).alias("ip_unique_channels_per_hour"),
 
-    df_features = df_features.with_columns([
-    # Menghitung Standar Deviasi selisih waktu dalam blok 1 Jam untuk setiap IP
-    # Semakin kecil nilainya, semakin "mesin" perilakunya
-    pl.col("seconds_since_prev_click")
-        .std()
-        .over([pl.col("ip"), pl.col("click_time").dt.truncate("1h")])
-        .alias("ip_rhythm_std_1h"),
+            (
+                (pl.col("os")
+                   .cumcount()
+                   .over([pl.col("ip"), pl.col("os"), pl.col("click_time").dt.truncate("1h")]) == 0)
+                .cast(pl.Int32)
+                .cumsum()
+                .over([pl.col("ip"), pl.col("click_time").dt.truncate("1h")])
+            ).alias("ip_unique_os_per_hour"),
+
+            (
+                (pl.col("app")
+                   .cumcount()
+                   .over([pl.col("ip"), pl.col("app"), pl.col("click_time").dt.truncate("1h")]) == 0)
+                .cast(pl.Int32)
+                .cumsum()
+                .over([pl.col("ip"), pl.col("click_time").dt.truncate("1h")])
+            ).alias("ip_unique_apps_per_hour")
         ])
-    
-    df_features = df_features.with_columns([
-    # 1. Flag eksplisit untuk klik pertama
-    pl.when(pl.col("ip_clicks_last_10m") <= 1)
-      .then(pl.lit(1))
-      .otherwise(pl.lit(0))
-      .alias("is_first_click"),
-      
-    # 2. Variansi OS: Menghitung berapa banyak OS berbeda dari IP ini dalam 1 jam
-    pl.col("os").n_unique().over(["ip", "click_hour"]).alias("ip_unique_os_per_hour"),
-    
-    # 3. Variansi Aplikasi: Apakah IP ini mendownload 50 aplikasi berbeda sekaligus?
-    pl.col("app").n_unique().over(["ip", "click_hour"]).alias("ip_unique_apps_per_hour")
-])
+        .with_columns([
+            # -- FITUR RITME (ORTOGONAL L2) --
+            # Fungsi std() di Polars secara otomatis akan mengabaikan nilai Null
+            pl.col("seconds_since_prev_click").std()
+                .over([pl.col("ip"), pl.col("click_time").dt.truncate("1h")])
+                .alias("ip_rhythm_std_1h"),
+                
+            # -- FITUR INDIKATOR (PERBAIKAN LOGIKA) --
+            # Klik pertama dikonfirmasi jika prev_click_time kosong
+            pl.col("prev_click_time").is_null().cast(pl.Int32).alias("is_first_click")
+        ])
+        .drop("prev_click_time") # Membersihkan memori dari kolom sementara
+    )
 
     return df_features
 
