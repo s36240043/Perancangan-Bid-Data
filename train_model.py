@@ -1,5 +1,7 @@
 import polars as pl
 from sklearn.ensemble import IsolationForest
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
 import xgboost as xgb
 import numpy as np
 
@@ -118,6 +120,20 @@ def train_and_infer_xgboost(df: pl.DataFrame, rule_features: list, ml_features: 
     y_train = df_train.select("is_bot_target").to_numpy().flatten()
     print(f"   Distribusi Pelatihan: {np.sum(y_train==1):,} Bot | {np.sum(y_train==0):,} Manusia")
 
+    # Split Train/Validation untuk evaluasi model
+    if len(np.unique(y_train)) > 1:
+        X_tr, X_val, y_tr, y_val = train_test_split(
+            X_train,
+            y_train,
+            test_size=0.2,
+            stratify=y_train,
+            random_state=42
+        )
+        print(f"   Split pelatihan: {X_tr.shape[0]:,} baris train | {X_val.shape[0]:,} baris validasi")
+    else:
+        X_tr, X_val, y_tr, y_val = X_train, X_train, y_train, y_train
+        print("   Hanya satu kelas target tersedia. Evaluasi validasi dilewati.")
+
     # 2. PELATIHAN MODEL XGBOOST
     print("\n2. Melatih Model XGBoost (Orthogonal Feature Space)...")
     # Parameter dioptimalkan untuk kecepatan dan pencegahan overfitting (regularisasi L2)
@@ -133,6 +149,15 @@ def train_and_infer_xgboost(df: pl.DataFrame, rule_features: list, ml_features: 
     }
     
     model = xgb.XGBClassifier(**xgb_params)
+    model.fit(X_tr, y_tr)
+
+    if len(np.unique(y_train)) > 1:
+        y_val_pred = model.predict(X_val)
+        print("\n3. Evaluasi Model pada Validation Set:")
+        print(classification_report(y_val, y_val_pred))
+        print(f"   Akurasi validasi: {accuracy_score(y_val, y_val_pred):.4f}")
+    
+    # Fit ulang pada seluruh data ground truth sebelum inferensi zona abu-abu
     model.fit(X_train, y_train)
 
     # 3. PERSIAPAN DATA INFERENSI (ZONA ABU-ABU)

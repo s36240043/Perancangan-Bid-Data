@@ -96,7 +96,7 @@ def apply_heuristic_rules(df: pl.DataFrame) -> pl.DataFrame:
         df = df.with_columns(pl.lit(None).alias("ctit_seconds"))
 
     # Definisi Rules (Predicate)
-    rule_speed     = (pl.col("seconds_since_prev_click") >= 0) & (pl.col("seconds_since_prev_click") < 0.5)
+    rule_speed     = (pl.col("seconds_since_prev_click") >= 0) & (pl.col("seconds_since_prev_click") < 1.0)
     rule_burst     = pl.col("ip_clicks_last_10m") > 300
     rule_emulator  = pl.col("fingerprint_clicks_last_1h") > 150
     rule_spraying  = pl.col("ip_unique_channels_per_hour") > 20
