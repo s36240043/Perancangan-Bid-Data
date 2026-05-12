@@ -30,11 +30,11 @@ def generate_fraud_features(df: pl.DataFrame) -> pl.DataFrame:
                 .alias("seconds_since_prev_click"),
 
             # -- FITUR DENSITAS WAKTU --
-            pl.col("app").cumcount()
+            pl.col("click_time").rank("dense")
                 .over([pl.col("ip"), pl.col("click_time").dt.truncate("10m")])
                 .alias("ip_clicks_last_10m"),
 
-            pl.col("app").cumcount()
+            pl.col("click_time").rank("dense")
                 .over(["ip", "device", "os", pl.col("click_time").dt.truncate("1h")])
                 .alias("fingerprint_clicks_last_1h"),
 
@@ -42,28 +42,28 @@ def generate_fraud_features(df: pl.DataFrame) -> pl.DataFrame:
             # tandai kemunculan pertama channel dalam (ip, hour) lalu akumulasi => distinct so far
             (
                 (pl.col("channel")
-                   .cumcount()
+                   .cum_count()
                    .over([pl.col("ip"), pl.col("channel"), pl.col("click_time").dt.truncate("1h")]) == 0)
                 .cast(pl.Int32)
-                .cumsum()
+                .cum_sum()
                 .over([pl.col("ip"), pl.col("click_time").dt.truncate("1h")])
             ).alias("ip_unique_channels_per_hour"),
 
             (
                 (pl.col("os")
-                   .cumcount()
+                   .cum_count()
                    .over([pl.col("ip"), pl.col("os"), pl.col("click_time").dt.truncate("1h")]) == 0)
                 .cast(pl.Int32)
-                .cumsum()
+                .cum_sum()
                 .over([pl.col("ip"), pl.col("click_time").dt.truncate("1h")])
             ).alias("ip_unique_os_per_hour"),
 
             (
                 (pl.col("app")
-                   .cumcount()
+                   .cum_count()
                    .over([pl.col("ip"), pl.col("app"), pl.col("click_time").dt.truncate("1h")]) == 0)
                 .cast(pl.Int32)
-                .cumsum()
+                .cum_sum()
                 .over([pl.col("ip"), pl.col("click_time").dt.truncate("1h")])
             ).alias("ip_unique_apps_per_hour")
         ])
@@ -104,7 +104,7 @@ def apply_heuristic_rules(df: pl.DataFrame) -> pl.DataFrame:
         df = df.with_columns(pl.lit(None).alias("ctit_seconds"))
 
     # Definisi Rules (Predicate)
-    rule_speed     = (pl.col("seconds_since_prev_click") >= 0) & (pl.col("seconds_since_prev_click") < 0.5)
+    rule_speed     = (pl.col("seconds_since_prev_click") >= 0) & (pl.col("seconds_since_prev_click") < 1.0)
     rule_burst     = pl.col("ip_clicks_last_10m") > 300
     rule_emulator  = pl.col("fingerprint_clicks_last_1h") > 150
     rule_spraying  = pl.col("ip_unique_channels_per_hour") > 20
