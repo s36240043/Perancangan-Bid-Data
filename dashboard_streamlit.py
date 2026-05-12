@@ -173,8 +173,8 @@ elif page == "4. Simulator ROI & Bisnis":
     st.metric("Total Penyelamatan Anggaran (Net ROI)", f"${total_saved:,.2f}", "+ Laba Bersih Operasional")
     
     # Logical Guardrail Warning
-    if total_saved > 1000000:
-        st.warning("⚠️ **Peringatan Simulasi:** Nilai CPC/CPA yang Anda masukkan menghasilkan estimasi penghematan di atas \$1 Juta. Di dunia nyata, angka sebesar ini akan memicu teguran otomatis dari jaringan iklan untuk meninjau ulang kontrak lelang.")
+    # if total_saved > 1000000:
+    #     st.warning("⚠️ **Peringatan Simulasi:** Nilai CPC/CPA yang Anda masukkan menghasilkan estimasi penghematan di atas \$1 Juta. Di dunia nyata, angka sebesar ini akan memicu teguran otomatis dari jaringan iklan untuk meninjau ulang kontrak lelang.")
     
     # Visualisasi Waterfall
     fig = go.Figure(go.Waterfall(
